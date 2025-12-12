@@ -1,4 +1,4 @@
-# Bank Synth - Synthetic Data Generator
+# Synthetic Data Generator
 
 **DDG (Dynamic Data Generator)** is a model-trained framework that generates realistic, relationally consistent synthetic test data for banking systems without copying production data.
 
