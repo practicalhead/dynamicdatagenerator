@@ -400,6 +400,18 @@ def train(
     default=0.1,
     help="Scale factor for parent table row counts",
 )
+@click.option(
+    "--spark",
+    is_flag=True,
+    default=False,
+    help="Use Spark for parallel generation (recommended for large datasets)",
+)
+@click.option(
+    "--hive_database",
+    type=str,
+    default=None,
+    help="Hive database to write directly to (Spark mode only)",
+)
 def generate(
     model: Path,
     target_table: str,
@@ -411,9 +423,13 @@ def generate(
     run_id: Optional[str],
     table_rows: Optional[str],
     parent_scale: float,
+    spark: bool,
+    hive_database: Optional[str],
 ) -> None:
     """
     Generate synthetic data from a trained model.
+
+    Use --spark for parallel generation of large datasets (millions+ rows).
 
     Examples:
 
@@ -422,17 +438,21 @@ def generate(
             --target_table TRANSACTIONS --target_rows 10000 \\
             --output_dir output
 
+        # Generate 10 million rows using Spark (parallel)
+        bank_synth generate --model models/CORE_modelpack \\
+            --target_table TRANSACTIONS --target_rows 10000000 \\
+            --spark --hive_database test_data
+
         # Generate with specific seed for reproducibility
         bank_synth generate --model models/CORE_modelpack \\
             --target_table ACCOUNTS --target_rows 5000 \\
-            --seed 42 --output_formats hive,oracle
+            --seed 42 --output_formats hive_orc,oracle
 
         # Generate with custom row counts for parent tables
         bank_synth generate --model models/CORE_modelpack \\
             --target_table TRANSACTIONS --target_rows 10000 \\
             --table_rows "CUSTOMERS:1000,ACCOUNTS:2000"
     """
-    from bank_synth.generator import Generator
     from bank_synth.output import OutputWriter
     from bank_synth.utils import QualityReporter
 
@@ -478,56 +498,120 @@ def generate(
     console.print(f"Model pack version: {model_pack.version}")
     console.print(f"Tables in model: {len(model_pack.tables_trained)}")
 
-    # Initialize generator
-    generator = Generator(model_pack, config)
+    if spark:
+        # Use Spark for parallel generation
+        console.print("[cyan]Using Spark for parallel generation[/cyan]")
 
-    # Generate data
-    console.print("\n[bold]Generating data...[/bold]")
-    generated_data = generator.generate()
+        from bank_synth.spark import SparkGenerator
 
-    # Print generation summary
-    table = Table(title="Generated Tables")
-    table.add_column("Table", style="cyan")
-    table.add_column("Rows", style="green", justify="right")
-    table.add_column("Columns", style="yellow", justify="right")
+        spark_generator = SparkGenerator(model_pack, config)
 
-    for tbl_name, df in generated_data.items():
-        table.add_row(tbl_name, f"{len(df):,}", str(len(df.columns)))
+        # Generate data using Spark
+        console.print("\n[bold]Generating data with Spark...[/bold]")
+        spark_data = spark_generator.generate()
 
-    console.print(table)
+        # Print generation summary
+        table = Table(title="Generated Tables (Spark)")
+        table.add_column("Table", style="cyan")
+        table.add_column("Rows", style="green", justify="right")
+        table.add_column("Columns", style="yellow", justify="right")
 
-    # Write outputs
-    console.print("\n[bold]Writing outputs...[/bold]")
-    writer = OutputWriter(config, model_pack)
-    output_paths = writer.write(generated_data)
+        for tbl_name, sdf in spark_data.items():
+            row_count = sdf.count()
+            table.add_row(tbl_name, f"{row_count:,}", str(len(sdf.columns)))
 
-    # Generate quality report
-    console.print("\n[bold]Generating quality report...[/bold]")
-    reporter = QualityReporter(model_pack, generated_data)
-    report = reporter.generate_report()
-    json_path, md_path = reporter.save(writer.get_output_dir())
+        console.print(table)
 
-    # Print final summary
-    console.print("\n[green]Generation complete![/green]")
-    console.print(f"Output directory: {writer.get_output_dir()}")
+        # Write directly to Hive if database specified
+        if hive_database:
+            console.print(f"\n[bold]Writing to Hive database: {hive_database}[/bold]")
+            output_tables = spark_generator.write_to_hive(
+                database=hive_database,
+                format="orc",
+            )
 
-    summary_table = Table(title="Output Summary")
-    summary_table.add_column("Format", style="cyan")
-    summary_table.add_column("Files", style="green", justify="right")
+            console.print("\n[green]Generation complete![/green]")
+            summary_table = Table(title="Hive Tables Created")
+            summary_table.add_column("Table", style="cyan")
+            summary_table.add_column("Hive Path", style="green")
 
-    for fmt, paths in output_paths.items():
-        summary_table.add_row(fmt.upper(), str(len(paths)))
+            for tbl_name, hive_path in output_tables.items():
+                summary_table.add_row(tbl_name, hive_path)
 
-    summary_table.add_row("Reports", "2")
-    console.print(summary_table)
+            console.print(summary_table)
+        else:
+            # Convert to pandas and write using standard output
+            console.print("\n[bold]Writing outputs...[/bold]")
+            generated_data = spark_generator.to_pandas()
 
-    # Print referential integrity score
-    ri_score = report["referential_integrity"]["integrity_score"]
-    if ri_score == 1.0:
-        console.print(f"\n[green]Referential Integrity: {ri_score:.0%}[/green]")
+            writer = OutputWriter(config, model_pack)
+            output_paths = writer.write(generated_data)
+
+            console.print("\n[green]Generation complete![/green]")
+            console.print(f"Output directory: {writer.get_output_dir()}")
+
+            summary_table = Table(title="Output Summary")
+            summary_table.add_column("Format", style="cyan")
+            summary_table.add_column("Files", style="green", justify="right")
+
+            for fmt, paths in output_paths.items():
+                summary_table.add_row(fmt.upper(), str(len(paths)))
+
+            console.print(summary_table)
+
     else:
-        console.print(f"\n[yellow]Referential Integrity: {ri_score:.0%}[/yellow]")
-        console.print("See quality report for details on violations.")
+        # Use standard pandas-based generator
+        from bank_synth.generator import Generator
+
+        generator = Generator(model_pack, config)
+
+        # Generate data
+        console.print("\n[bold]Generating data...[/bold]")
+        generated_data = generator.generate()
+
+        # Print generation summary
+        table = Table(title="Generated Tables")
+        table.add_column("Table", style="cyan")
+        table.add_column("Rows", style="green", justify="right")
+        table.add_column("Columns", style="yellow", justify="right")
+
+        for tbl_name, df in generated_data.items():
+            table.add_row(tbl_name, f"{len(df):,}", str(len(df.columns)))
+
+        console.print(table)
+
+        # Write outputs
+        console.print("\n[bold]Writing outputs...[/bold]")
+        writer = OutputWriter(config, model_pack)
+        output_paths = writer.write(generated_data)
+
+        # Generate quality report
+        console.print("\n[bold]Generating quality report...[/bold]")
+        reporter = QualityReporter(model_pack, generated_data)
+        report = reporter.generate_report()
+        json_path, md_path = reporter.save(writer.get_output_dir())
+
+        # Print final summary
+        console.print("\n[green]Generation complete![/green]")
+        console.print(f"Output directory: {writer.get_output_dir()}")
+
+        summary_table = Table(title="Output Summary")
+        summary_table.add_column("Format", style="cyan")
+        summary_table.add_column("Files", style="green", justify="right")
+
+        for fmt, paths in output_paths.items():
+            summary_table.add_row(fmt.upper(), str(len(paths)))
+
+        summary_table.add_row("Reports", "2")
+        console.print(summary_table)
+
+        # Print referential integrity score
+        ri_score = report["referential_integrity"]["integrity_score"]
+        if ri_score == 1.0:
+            console.print(f"\n[green]Referential Integrity: {ri_score:.0%}[/green]")
+        else:
+            console.print(f"\n[yellow]Referential Integrity: {ri_score:.0%}[/yellow]")
+            console.print("See quality report for details on violations.")
 
 
 @cli.command()
