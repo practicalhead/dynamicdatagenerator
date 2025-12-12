@@ -1,0 +1,112 @@
+# Privacy policy configuration for bank_synth
+#
+# Defines how sensitive columns should be handled during training and generation.
+#
+# Privacy Levels:
+#   - public: No restrictions, learn and generate from actual distribution
+#   - internal: Learn distribution but mask in reports
+#   - sensitive: Learn format only, generate synthetic values matching pattern
+#   - pii: Do not learn from actual data, generate using Faker providers
+#   - restricted: Drop column entirely from training and generation
+#
+# Usage:
+#   bank_synth train --privacy_policy configs/privacy.yaml ...
+
+# Per-table column privacy settings
+tables:
+  CUSTOMERS:
+    # Social Security Number - PII, generate synthetic
+    ssn:
+      level: pii
+      faker_provider: ssn
+
+    # Date of birth - Sensitive, preserve age distribution
+    date_of_birth:
+      level: sensitive
+      format_pattern: "9999-99-99"
+
+    # Email - PII, generate synthetic
+    email:
+      level: pii
+      faker_provider: email
+
+    # Phone - PII, generate synthetic
+    phone:
+      level: pii
+      faker_provider: phone_number
+
+    # Name - PII, generate synthetic
+    customer_name:
+      level: pii
+      faker_provider: name
+
+    # Status - Public
+    status: public
+
+  ACCOUNTS:
+    # Account number - Sensitive, format-preserving
+    account_number:
+      level: sensitive
+      format_pattern: "9999-9999-9999-9999"
+
+    # Balance - Internal, learn distribution but mask
+    balance: internal
+
+  TRANSACTIONS:
+    # Amount - Internal
+    amount: internal
+
+    # Description - May contain PII
+    description:
+      level: sensitive
+      faker_provider: sentence
+
+    # Reference number - Sensitive
+    reference_number:
+      level: sensitive
+      format_pattern: "REF-999999999"
+
+  CUSTOMER_ADDRESSES:
+    # All address fields - PII
+    street_address:
+      level: pii
+      faker_provider: street_address
+
+    city:
+      level: pii
+      faker_provider: city
+
+    state:
+      level: pii
+      faker_provider: state_abbr
+
+    zip_code:
+      level: pii
+      faker_provider: zipcode
+
+# Global defaults (applied to columns not explicitly listed)
+defaults:
+  # Default level for unlisted columns
+  level: internal
+
+  # Patterns for auto-detecting sensitive columns
+  sensitive_patterns:
+    - ".*_ssn$"
+    - ".*_tin$"
+    - ".*_ein$"
+    - "social_security.*"
+    - "tax_id.*"
+
+  pii_patterns:
+    - ".*_name$"
+    - "first_name"
+    - "last_name"
+    - ".*_email$"
+    - "email.*"
+    - ".*_phone$"
+    - "phone.*"
+    - ".*_address$"
+    - "street.*"
+    - ".*_dob$"
+    - "date_of_birth"
+    - "birth_date"

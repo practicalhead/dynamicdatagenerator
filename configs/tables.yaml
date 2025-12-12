@@ -1,0 +1,192 @@
+# Table configuration for bank_synth training
+#
+# Lists tables to include in training along with optional column-level configuration.
+#
+# Usage:
+#   bank_synth train --tables_file configs/tables.yaml ...
+
+# List of tables to train
+tables:
+  - CUSTOMERS
+  - ACCOUNTS
+  - TRANSACTIONS
+  - ACCOUNT_TYPES
+  - TRANSACTION_TYPES
+  - BRANCHES
+  - CUSTOMER_ADDRESSES
+
+# Optional: Table-specific configuration
+table_config:
+  CUSTOMERS:
+    primary_key:
+      - CUSTOMER_ID
+    is_reference_table: false
+    columns:
+      customer_id:
+        data_type: bigint
+        nullable: false
+      customer_name:
+        data_type: string
+        max_length: 200
+      ssn:
+        data_type: string
+        max_length: 11
+        privacy_level: pii
+        faker_provider: ssn
+      date_of_birth:
+        data_type: date
+      email:
+        data_type: string
+        max_length: 255
+        faker_provider: email
+      phone:
+        data_type: string
+        faker_provider: phone_number
+      created_date:
+        data_type: timestamp
+      status:
+        data_type: string
+        allowed_values: ["ACTIVE", "INACTIVE", "SUSPENDED", "CLOSED"]
+
+  ACCOUNTS:
+    primary_key:
+      - ACCOUNT_ID
+    columns:
+      account_id:
+        data_type: bigint
+        nullable: false
+      customer_id:
+        data_type: bigint
+        nullable: false
+      account_type_id:
+        data_type: integer
+      account_number:
+        data_type: string
+        max_length: 20
+        format_pattern: "9999-9999-9999-9999"
+      balance:
+        data_type: decimal
+        precision: 18
+        scale: 2
+        value_range: [0, 10000000]
+      opened_date:
+        data_type: date
+      status:
+        data_type: string
+        allowed_values: ["OPEN", "CLOSED", "FROZEN"]
+
+  TRANSACTIONS:
+    primary_key:
+      - TRANSACTION_ID
+    columns:
+      transaction_id:
+        data_type: bigint
+        nullable: false
+      account_id:
+        data_type: bigint
+        nullable: false
+      transaction_type_id:
+        data_type: integer
+      amount:
+        data_type: decimal
+        precision: 18
+        scale: 2
+      transaction_date:
+        data_type: timestamp
+      description:
+        data_type: string
+        max_length: 500
+      reference_number:
+        data_type: string
+        max_length: 50
+
+  ACCOUNT_TYPES:
+    primary_key:
+      - ACCOUNT_TYPE_ID
+    is_reference_table: true
+    columns:
+      account_type_id:
+        data_type: integer
+        nullable: false
+      type_name:
+        data_type: string
+        max_length: 100
+      type_code:
+        data_type: string
+        max_length: 10
+        allowed_values: ["CHK", "SAV", "MMA", "CD", "IRA"]
+
+  TRANSACTION_TYPES:
+    primary_key:
+      - TRANSACTION_TYPE_ID
+    is_reference_table: true
+    columns:
+      transaction_type_id:
+        data_type: integer
+        nullable: false
+      type_name:
+        data_type: string
+        max_length: 100
+      type_code:
+        data_type: string
+        max_length: 10
+        allowed_values: ["DEP", "WDR", "TRF", "PMT", "FEE", "INT"]
+
+  BRANCHES:
+    primary_key:
+      - BRANCH_ID
+    is_reference_table: true
+    columns:
+      branch_id:
+        data_type: integer
+        nullable: false
+      branch_name:
+        data_type: string
+        max_length: 200
+      branch_code:
+        data_type: string
+        max_length: 10
+      address:
+        data_type: string
+        max_length: 500
+      city:
+        data_type: string
+        max_length: 100
+      state:
+        data_type: string
+        max_length: 2
+      zip_code:
+        data_type: string
+        max_length: 10
+
+  CUSTOMER_ADDRESSES:
+    primary_key:
+      - ADDRESS_ID
+    columns:
+      address_id:
+        data_type: bigint
+        nullable: false
+      customer_id:
+        data_type: bigint
+        nullable: false
+      address_type:
+        data_type: string
+        allowed_values: ["HOME", "WORK", "MAILING"]
+      street_address:
+        data_type: string
+        max_length: 500
+        faker_provider: street_address
+      city:
+        data_type: string
+        max_length: 100
+        faker_provider: city
+      state:
+        data_type: string
+        max_length: 2
+        faker_provider: state_abbr
+      zip_code:
+        data_type: string
+        max_length: 10
+        faker_provider: zipcode
+      is_primary:
+        data_type: boolean
