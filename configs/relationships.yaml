@@ -1,0 +1,70 @@
+# Relationship definitions for bank_synth
+#
+# Defines PK/FK relationships between tables.
+# These override any relationships discovered from database catalogs.
+#
+# Usage:
+#   bank_synth train --relationships configs/relationships.yaml ...
+
+relationships:
+  # Customer -> Accounts (1:N)
+  - name: fk_accounts_customer
+    parent_table: CUSTOMERS
+    parent_columns:
+      - CUSTOMER_ID
+    child_table: ACCOUNTS
+    child_columns:
+      - CUSTOMER_ID
+    cardinality: "1:N"
+    is_optional: false
+
+  # Account Type -> Accounts (1:N)
+  - name: fk_accounts_type
+    parent_table: ACCOUNT_TYPES
+    parent_columns:
+      - ACCOUNT_TYPE_ID
+    child_table: ACCOUNTS
+    child_columns:
+      - ACCOUNT_TYPE_ID
+    cardinality: "1:N"
+    is_optional: true
+
+  # Account -> Transactions (1:N)
+  - name: fk_transactions_account
+    parent_table: ACCOUNTS
+    parent_columns:
+      - ACCOUNT_ID
+    child_table: TRANSACTIONS
+    child_columns:
+      - ACCOUNT_ID
+    cardinality: "1:N"
+    is_optional: false
+
+  # Transaction Type -> Transactions (1:N)
+  - name: fk_transactions_type
+    parent_table: TRANSACTION_TYPES
+    parent_columns:
+      - TRANSACTION_TYPE_ID
+    child_table: TRANSACTIONS
+    child_columns:
+      - TRANSACTION_TYPE_ID
+    cardinality: "1:N"
+    is_optional: true
+
+  # Customer -> Customer Addresses (1:N)
+  - name: fk_addresses_customer
+    parent_table: CUSTOMERS
+    parent_columns:
+      - CUSTOMER_ID
+    child_table: CUSTOMER_ADDRESSES
+    child_columns:
+      - CUSTOMER_ID
+    cardinality: "1:N"
+    is_optional: false
+
+# Additional metadata about relationships
+# (optional, for documentation)
+relationship_notes:
+  fk_accounts_customer: "Each account must belong to exactly one customer"
+  fk_transactions_account: "Each transaction must belong to exactly one account"
+  fk_accounts_type: "Account type is optional for legacy accounts"
