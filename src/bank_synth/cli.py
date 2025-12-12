@@ -1,7 +1,8 @@
 """
 Command-line interface for bank_synth.
 
-Provides train and generate commands for synthetic data generation.
+Provides train, generate, and discover commands for synthetic data generation.
+Zero-intervention workflow using query-based relationship discovery.
 """
 
 from __future__ import annotations
@@ -49,9 +50,9 @@ def cli(verbose: bool) -> None:
 @cli.command()
 @click.option(
     "--source",
-    type=click.Choice(["oracle", "hive", "samples", "both"]),
-    default="samples",
-    help="Data source for training",
+    type=click.Choice(["oracle", "hive", "samples", "both", "auto"]),
+    default="auto",
+    help="Data source for training (auto uses queries + samples)",
 )
 @click.option(
     "--oracle_conn",
@@ -80,7 +81,7 @@ def cli(verbose: bool) -> None:
     "--tables",
     type=str,
     default=None,
-    help="Comma-separated list of table names",
+    help="Comma-separated list of table names (auto-discovered from queries if not provided)",
 )
 @click.option(
     "--sample_dir",
@@ -95,10 +96,16 @@ def cli(verbose: bool) -> None:
     help="Sampling strategy (percent:N, rows:N, or full)",
 )
 @click.option(
+    "--queries",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Path to SQL queries file or directory (ETL/reporting queries for relationship discovery)",
+)
+@click.option(
     "--relationships",
     type=click.Path(exists=True, path_type=Path),
     default=None,
-    help="YAML file with relationship definitions",
+    help="YAML file with relationship definitions (optional, auto-discovered from queries)",
 )
 @click.option(
     "--privacy_policy",
@@ -112,6 +119,12 @@ def cli(verbose: bool) -> None:
     required=True,
     help="Output path for model pack",
 )
+@click.option(
+    "--min_confidence",
+    type=float,
+    default=0.3,
+    help="Minimum confidence threshold for auto-discovered relationships",
+)
 def train(
     source: str,
     oracle_conn: Optional[str],
@@ -121,28 +134,37 @@ def train(
     tables: Optional[str],
     sample_dir: Optional[Path],
     sample_strategy: str,
+    queries: Optional[Path],
     relationships: Optional[Path],
     privacy_policy: Optional[Path],
     model_out: Path,
+    min_confidence: float,
 ) -> None:
     """
     Train synthetic data models from sample data.
 
+    Zero-intervention mode: Provide queries to auto-discover relationships.
+    No manual relationship configuration needed!
+
     Examples:
 
-        # Train from local sample files
+        # Zero-intervention: Auto-discover from queries (RECOMMENDED)
+        bank_synth train --source auto --schema CORE \\
+            --queries ./etl_queries/ --sample_dir ./samples \\
+            --model_out models/CORE_modelpack
+
+        # Train from local sample files with manual relationships
         bank_synth train --source samples --schema CORE \\
             --sample_dir ./samples --tables_file configs/tables.yaml \\
             --relationships configs/relationships.yaml \\
             --model_out models/CORE_modelpack
 
-        # Train from Oracle database
+        # Train from Oracle database with auto-discovery
         bank_synth train --source oracle --schema CORE \\
             --oracle_conn "user/pwd@localhost:1521/ORCL" \\
-            --tables CUSTOMERS,ACCOUNTS,TRANSACTIONS \\
+            --queries ./reporting_queries/ \\
             --model_out models/CORE_modelpack
     """
-    from bank_synth.metadata import MetadataResolver
     from bank_synth.trainer import Trainer
 
     console.print("[bold blue]Bank Synth Training[/bold blue]")
@@ -163,60 +185,106 @@ def train(
     elif tables:
         table_list = [t.strip() for t in tables.split(",")]
 
-    if not table_list:
-        console.print("[red]Error: No tables specified. Use --tables or --tables_file[/red]")
-        sys.exit(1)
-
-    console.print(f"Tables: {len(table_list)}")
-
-    # Initialize metadata resolver
+    # Initialize extractors
     oracle_extractor = None
     hive_extractor = None
 
-    if source in ("oracle", "both") and oracle_conn:
+    if source in ("oracle", "both", "auto") and oracle_conn:
         from bank_synth.metadata import OracleMetadataExtractor
         oracle_extractor = OracleMetadataExtractor(oracle_conn)
 
-    if source in ("hive", "both") and hive_spark:
+    if source in ("hive", "both", "auto") and hive_spark:
         from bank_synth.metadata import HiveMetadataExtractor
         hive_extractor = HiveMetadataExtractor()
 
-    resolver = MetadataResolver(
-        oracle_extractor=oracle_extractor,
-        hive_extractor=hive_extractor,
-        relationships_file=relationships,
-        privacy_policy_file=privacy_policy,
-    )
+    # Use auto-discovery if queries are provided or source is "auto"
+    use_auto_discovery = queries is not None or source == "auto"
 
-    # Resolve metadata
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task("Resolving metadata...", total=None)
+    if use_auto_discovery:
+        from bank_synth.discovery import AutoDiscoveryPipeline
 
-        if source == "samples" and sample_dir:
-            graph = resolver.resolve_from_samples(
+        console.print("[cyan]Using auto-discovery mode (zero-intervention)[/cyan]")
+        if queries:
+            console.print(f"Queries: {queries}")
+
+        pipeline = AutoDiscoveryPipeline(
+            oracle_extractor=oracle_extractor,
+            hive_extractor=hive_extractor,
+            privacy_policy_file=privacy_policy,
+        )
+
+        # Resolve metadata using auto-discovery
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Auto-discovering relationships...", total=None)
+
+            graph = pipeline.discover(
                 schema=schema,
+                queries=queries,
+                tables=table_list if table_list else None,
                 sample_dir=sample_dir,
-                tables_config=tables_config,
-            )
-        else:
-            graph = resolver.resolve(
-                schema=schema,
-                tables=table_list,
-                source=source,
+                source="samples" if source == "auto" and sample_dir else source,
+                min_confidence=min_confidence,
             )
 
-        progress.update(task, completed=True)
+            progress.update(task, completed=True)
 
+        # Update table_list from discovered tables
+        if not table_list:
+            table_list = list(graph.tables.keys())
+
+        privacy_policy_dict = pipeline.get_privacy_policy()
+
+    else:
+        # Traditional mode with manual relationships
+        from bank_synth.metadata import MetadataResolver
+
+        if not table_list:
+            console.print("[red]Error: No tables specified. Use --tables, --tables_file, or provide --queries for auto-discovery[/red]")
+            sys.exit(1)
+
+        resolver = MetadataResolver(
+            oracle_extractor=oracle_extractor,
+            hive_extractor=hive_extractor,
+            relationships_file=relationships,
+            privacy_policy_file=privacy_policy,
+        )
+
+        # Resolve metadata
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Resolving metadata...", total=None)
+
+            if source == "samples" and sample_dir:
+                graph = resolver.resolve_from_samples(
+                    schema=schema,
+                    sample_dir=sample_dir,
+                    tables_config=tables_config,
+                )
+            else:
+                graph = resolver.resolve(
+                    schema=schema,
+                    tables=table_list,
+                    source=source,
+                )
+
+            progress.update(task, completed=True)
+
+        privacy_policy_dict = resolver.get_privacy_policy()
+
+    console.print(f"Tables: {len(table_list)}")
     console.print(f"Resolved {len(graph.tables)} tables, {len(graph.relationships)} relationships")
 
     # Initialize trainer
     trainer = Trainer(
         relationship_graph=graph,
-        privacy_policy=resolver.get_privacy_policy(),
+        privacy_policy=privacy_policy_dict,
     )
 
     # Load samples
@@ -305,8 +373,8 @@ def train(
 @click.option(
     "--output_formats",
     type=str,
-    default="hive,oracle",
-    help="Comma-separated output formats (hive, oracle)",
+    default="hive_orc,oracle",
+    help="Comma-separated output formats (hive_orc, hive_parquet, oracle)",
 )
 @click.option(
     "--output_dir",
@@ -460,6 +528,183 @@ def generate(
     else:
         console.print(f"\n[yellow]Referential Integrity: {ri_score:.0%}[/yellow]")
         console.print("See quality report for details on violations.")
+
+
+@cli.command()
+@click.option(
+    "--schema",
+    type=str,
+    required=True,
+    help="Schema/database name",
+)
+@click.option(
+    "--queries",
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+    help="Path to SQL queries file or directory (ETL/reporting queries)",
+)
+@click.option(
+    "--sample_dir",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Directory containing sample Parquet/CSV files",
+)
+@click.option(
+    "--oracle_conn",
+    type=str,
+    default=None,
+    help="Oracle connection string for PK/FK metadata",
+)
+@click.option(
+    "--hive_spark",
+    is_flag=True,
+    help="Use Spark for Hive metastore access",
+)
+@click.option(
+    "--min_confidence",
+    type=float,
+    default=0.3,
+    help="Minimum confidence threshold for relationships",
+)
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Output path for discovered relationships YAML",
+)
+def discover(
+    schema: str,
+    queries: Path,
+    sample_dir: Optional[Path],
+    oracle_conn: Optional[str],
+    hive_spark: bool,
+    min_confidence: float,
+    output: Optional[Path],
+) -> None:
+    """
+    Discover table relationships from SQL queries (zero-intervention).
+
+    This command analyzes your ETL/reporting queries and database metadata
+    to automatically discover table relationships without manual configuration.
+
+    Examples:
+
+        # Discover relationships from queries
+        bank_synth discover --schema CORE --queries ./etl_queries/
+
+        # Discover with sample data for metadata
+        bank_synth discover --schema CORE \\
+            --queries ./etl_queries/ --sample_dir ./samples
+
+        # Discover with Oracle metadata
+        bank_synth discover --schema CORE \\
+            --queries ./etl_queries/ \\
+            --oracle_conn "user/pwd@host:1521/SID"
+
+        # Save discovered relationships to file
+        bank_synth discover --schema CORE \\
+            --queries ./etl_queries/ --output discovered_relationships.yaml
+    """
+    from bank_synth.discovery import AutoDiscoveryPipeline
+
+    console.print("[bold blue]Bank Synth - Relationship Discovery[/bold blue]")
+    console.print(f"Schema: {schema}")
+    console.print(f"Queries: {queries}")
+
+    # Initialize extractors
+    oracle_extractor = None
+    hive_extractor = None
+
+    if oracle_conn:
+        from bank_synth.metadata import OracleMetadataExtractor
+        oracle_extractor = OracleMetadataExtractor(oracle_conn)
+        console.print(f"Oracle: Connected")
+
+    if hive_spark:
+        from bank_synth.metadata import HiveMetadataExtractor
+        hive_extractor = HiveMetadataExtractor()
+        console.print(f"Hive: Connected via Spark")
+
+    pipeline = AutoDiscoveryPipeline(
+        oracle_extractor=oracle_extractor,
+        hive_extractor=hive_extractor,
+    )
+
+    # Discover relationships
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Analyzing queries and discovering relationships...", total=None)
+
+        graph = pipeline.discover(
+            schema=schema,
+            queries=queries,
+            sample_dir=sample_dir,
+            min_confidence=min_confidence,
+        )
+
+        progress.update(task, completed=True)
+
+    # Display results
+    console.print(f"\n[green]Discovery complete![/green]")
+
+    # Tables table
+    tables_table = Table(title="Discovered Tables")
+    tables_table.add_column("Table", style="cyan")
+    tables_table.add_column("Columns", style="green", justify="right")
+    tables_table.add_column("PK", style="yellow")
+
+    for table_name in sorted(graph.tables.keys()):
+        table_meta = graph.get_table(table_name)
+        pk_cols = [c.name for c in table_meta.columns if c.is_primary_key]
+        tables_table.add_row(
+            table_name,
+            str(len(table_meta.columns)),
+            ", ".join(pk_cols) if pk_cols else "-",
+        )
+
+    console.print(tables_table)
+
+    # Relationships table
+    if graph.relationships:
+        rel_table = Table(title="Discovered Relationships")
+        rel_table.add_column("Parent", style="cyan")
+        rel_table.add_column("Parent Column", style="green")
+        rel_table.add_column("Child", style="yellow")
+        rel_table.add_column("Child Column", style="magenta")
+        rel_table.add_column("Cardinality", style="blue")
+
+        for rel in graph.relationships:
+            rel_table.add_row(
+                rel.parent_table,
+                ", ".join(rel.parent_columns),
+                rel.child_table,
+                ", ".join(rel.child_columns),
+                rel.cardinality,
+            )
+
+        console.print(rel_table)
+    else:
+        console.print("\n[yellow]No relationships discovered.[/yellow]")
+        console.print("Try providing more queries or ensure queries have JOINs.")
+
+    # Save to file if requested
+    if output:
+        output = Path(output)
+        relationships_data = {
+            "schema": schema,
+            "discovered_from": str(queries),
+            "min_confidence": min_confidence,
+            "tables": list(graph.tables.keys()),
+            "relationships": [rel.to_dict() for rel in graph.relationships],
+        }
+
+        with open(output, "w") as f:
+            yaml.dump(relationships_data, f, default_flow_style=False)
+
+        console.print(f"\n[green]Saved relationships to: {output}[/green]")
 
 
 @cli.command()
